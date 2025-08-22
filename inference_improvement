@@ -1,0 +1,110 @@
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, HybridCache, Gemma3ForCausalLM, GemmaTokenizerFast, AutoProcessor, Gemma3nForCausalLM
+# transformers >= 4.53.0
+# timm==1.0.19
+# torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+
+PATH = "C:/Users/user/LLM/gemma3n"
+
+quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16
+        )
+
+# model = Gemma3ForCausalLM.from_pretrained(
+#     PATH,
+#     quantization_config=quantization_config,
+#     torch_dtype=torch.bfloat16,
+#     device_map="auto",
+#     low_cpu_mem_usage=True
+#     )
+
+model = Gemma3nForCausalLM.from_pretrained(PATH,
+                                        device_map="auto", 
+                                        torch_dtype=torch.bfloat16,
+                                        low_cpu_mem_usage=True
+                                        )
+
+model = model.eval()
+tokenizer = GemmaTokenizerFast.from_pretrained(PATH)
+
+
+msg = """<start_of_turn>user
+{prompt}<end_of_turn>
+<start_of_turn>model
+"""
+def gemma3_resp(prompt):
+    max_seq_len = 32768
+
+    # ----- 結果儲存 ----- #
+    res = list()
+
+    # ----- Prompt token產生 ----- #
+    MSG = msg.format(prompt=prompt)
+    input_ids = torch.tensor(tokenizer.encode(MSG)).to(model.device)
+    input_ids = input_ids.unsqueeze(0)
+    eos_token_ids = [tokenizer.eos_token_id, 106]
+
+    # ----- Cache宣告 ----- #
+    past_key_values = HybridCache(
+        config = model.config,
+        max_cache_len=max_seq_len,
+        max_batch_size=1,
+        device=model.device,
+        dtype=torch.bfloat16
+    )
+    
+    # ----- Prefill ----- #
+    chunks = torch.split(input_ids[:, :-1], 32, dim=-1)
+    st = 0
+    ed = 0
+    with torch.no_grad():
+        for chunk in chunks:
+            ed = st + chunk.shape[1]
+            attention_mask = torch.ones(1, ed, dtype=torch.long, device=model.device)
+            attention_mask[:, : -512] = 0
+            cache_position = torch.arange(st, ed, dtype=torch.long, device = model.device)
+            model(input_ids=chunk, use_cache=True, past_key_values=past_key_values, cache_position=cache_position , attention_mask=attention_mask)
+            st = ed
+    
+    # ----- Auto Regressive生成 ----- #
+    input_ids = input_ids[:, -1:]
+    attention_mask = torch.ones(1, ed, dtype=torch.long, device=model.device)
+    try:
+        for _ in range(max_seq_len):
+            with torch.no_grad():
+                # ----- Update position ----- #
+                ed += 1
+
+                # ----- Update model kwargs ----- #
+                cache_position = torch.arange(ed-1, ed, dtype=torch.long, device = model.device)
+
+                # ----- 生成token ----- #
+                outputs = model(input_ids=input_ids, use_cache=True, past_key_values=past_key_values, cache_position=cache_position)
+                logits = outputs.logits
+                next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
+                token_id = next_token.item()
+                input_ids = next_token
+
+                # ----- 判斷是否終止 ----- #
+                if token_id in eos_token_ids:
+                    break
+
+                # ----- 紀錄token ----- #
+                res += [tokenizer.decode(token_id)]
+                
+                # ----- 輸出文字字串 ----- #
+                print(res[-1], end="", flush=True)
+    except:
+        for item in ("input_ids", "outputs", "ogits", "next_token", "token_id"):
+            try:
+                eval(f"del {item}")
+            except:
+                pass
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        
+    return "".join(res)

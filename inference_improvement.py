@@ -1,5 +1,5 @@
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, HybridCache, Gemma3ForCausalLM, GemmaTokenizerFast, AutoProcessor, Gemma3nForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, HybridCache, Gemma3ForCausalLM, GemmaTokenizerFast, AutoProcessor, Gemma3nForCausalLM, DynamicCache
 # transformers >= 4.53.0
 # timm==1.0.19
 # torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
@@ -31,9 +31,10 @@ tokenizer = GemmaTokenizerFast.from_pretrained(PATH)
 
 
 msg = """<start_of_turn>user
-{prompt}<end_of_turn>
+[所有回應一律用繁體中文回答]{prompt}<end_of_turn>
 <start_of_turn>model
 """
+
 def gemma3_resp(prompt):
     max_seq_len = 32768
 
@@ -47,13 +48,7 @@ def gemma3_resp(prompt):
     eos_token_ids = [tokenizer.eos_token_id, 106]
 
     # ----- Cache宣告 ----- #
-    past_key_values = HybridCache(
-        config = model.config,
-        max_cache_len=max_seq_len,
-        max_batch_size=1,
-        device=model.device,
-        dtype=torch.bfloat16
-    )
+    past_key_values = DynamicCache()
     
     # ----- Prefill ----- #
     chunks = torch.split(input_ids[:, :-1], 32, dim=-1)
@@ -62,10 +57,7 @@ def gemma3_resp(prompt):
     with torch.no_grad():
         for chunk in chunks:
             ed = st + chunk.shape[1]
-            attention_mask = torch.ones(1, ed, dtype=torch.long, device=model.device)
-            attention_mask[:, : -512] = 0
-            cache_position = torch.arange(st, ed, dtype=torch.long, device = model.device)
-            model(input_ids=chunk, use_cache=True, past_key_values=past_key_values, cache_position=cache_position , attention_mask=attention_mask)
+            model(input_ids=chunk, use_cache=True, past_key_values=past_key_values)
             st = ed
     
     # ----- Auto Regressive生成 ----- #
